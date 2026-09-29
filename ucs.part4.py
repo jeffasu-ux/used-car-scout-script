@@ -1,4 +1,52 @@
 
+def cl_sapi(http: Polite, area_id: int, q: dict, sec: dict) -> list[dict]:
+    """Craigslist's own JSON search API (what the JS-rendered search page calls).
+    Returns plain dicts: id, url, title, price, miles, lat, lon, place."""
+    params = {"batch": f"{area_id}-0-360-0-0", "cc": "US", "lang": "en", "searchPath": "cta"}
+    params.update({k: v for k, v in q.items() if k != "cat"})
+    r = http.get("https://sapi.craigslist.org/web/v8/postings/search/full?" + urlencode(params),
+                 headers={"Accept": "application/json", "Referer": "https://www.craigslist.org/"})
+    why = blocked(r)
+    if why:
+        raise RuntimeError(f"search API {why}")
+    data = r.json().get("data") or {}
+    dec = data.get("decode") or {}
+    min_id = int(dec.get("minPostingId") or 0)
+    locs = dec.get("locations") or []
+    descs = dec.get("locationDescriptions") or []
+    out = []
+    for it in data.get("items") or []:
+        if not isinstance(it, list) or len(it) < 5:
+            continue
+        tags = {x[0]: x[1:] for x in it if isinstance(x, list) and x and isinstance(x[0], int)}
+        title = next((x for x in reversed(it) if isinstance(x, str) and not re.match(r"^\d+:\d+~", x)), "")
+        pid = min_id + int(it[0] or 0)
+        price = it[3] if isinstance(it[3], int) and it[3] > 0 else to_int((tags.get(10) or [None])[0])
+        lat = lon = None
+        host, sub, place = "", "", ""
+        lm = re.match(r"^(\d+):(\d+)~(-?[\d.]+)~(-?[\d.]+)", str(it[4]))
+        if lm:
+            li, di = int(lm.group(1)), int(lm.group(2))
+            lat, lon = float(lm.group(3)), float(lm.group(4))
+            if 0 < li < len(locs) and isinstance(locs[li], list):
+                host = locs[li][1] if len(locs[li]) > 1 else ""
+                sub = locs[li][2] if len(locs[li]) > 2 else ""
+            if 0 < di < len(descs):
+                place = str(descs[di])
+        slug = (tags.get(6) or [""])[0]
+        token = (tags.get(13) or [""])[0]
+        if token and slug:
+            url = f"https://www.craigslist.org/view/d/{slug}/{token}"
+        elif host and slug:
+            url = f"https://{host}.craigslist.org/{sub + '/' if sub else ''}cto/d/{slug}/{pid}.html"
+        else:
+            continue
+        miles = (tags.get(9) or [None])[0]
+        out.append({"id": f"cl:{pid}", "pid": pid, "url": url, "title": title, "price": price,
+                    "miles": miles if isinstance(miles, int) else None, "lat": lat, "lon": lon, "place": place})
+    return out
+
+
 def fetch_craigslist(cfg: dict, http: Polite, home: tuple[float, float]) -> tuple[list[Listing], SourceStatus]:
     sec = cfg["craigslist"]
     st = SourceStatus("Craigslist")
@@ -209,12 +257,15 @@ def fetch_craigslist(cfg: dict, http: Polite, home: tuple[float, float]) -> tupl
 
 def fetch_autodev(cfg: dict, http: Polite) -> tuple[list[Listing], SourceStatus]:
     st = SourceStatus("Auto.dev")
-    if not cfg["autodev"].get("enabled", True):
+    en = cfg["autodev"].get("enabled", "auto")
+    auto = str(en).strip().lower() in ("auto", "", "none")
+    if not auto and (en is False or str(en).strip().lower() in ("false", "no", "off", "0")):
         st.note = "disabled in config"
         return [], st
     key = (os.environ.get("AUTO_DEV_API_KEY") or "").strip()
     if not key:
-        st.note = "skipped: AUTO_DEV_API_KEY not set"
+        st.note = ("off: no AUTO_DEV_API_KEY set (optional; adds dealer listings with history reports)" if auto
+                   else "skipped: AUTO_DEV_API_KEY not set")
         return [], st
     hdr = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
     out: dict[str, Listing] = {}
@@ -334,4 +385,34 @@ def fetch_auctions(cfg: dict, http: Polite) -> tuple[list[Listing], SourceStatus
     if errors:
         st.note = "; ".join(errors)
     return list(out.values()), st
+
+
+# --------------------------------------------------------------------------- report
+
+def esc(v: Any) -> str:
+    return html.escape("" if v is None else str(v))
+
+
+def fmt(v: Any) -> str:
+    return f"{v:,}" if isinstance(v, int) else "—"
+
+
+CSS = """
+body{font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#1d1d1f}
+h1{margin-bottom:4px} .muted{color:#666} table{border-collapse:collapse;width:100%;margin:8px 0 20px;font-size:14px}
+th,td{border-bottom:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top} th{background:#f6f6f6;position:sticky;top:0}
+.b{display:inline-block;padding:1px 7px;border-radius:9px;font-size:12px;font-weight:600;white-space:nowrap}
+.high{background:#d9f5df;color:#135c25}.medium{background:#fff1c9;color:#6b4d00}.low{background:#fde0dc;color:#8a1c0f}
+.new{background:#dbe9ff;color:#0b3d91} .warn{color:#8a1c0f;font-weight:600} .num{text-align:right;white-space:nowrap}
+.card{border:1px solid #ddd;border-radius:10px;padding:12px 14px;margin:0 0 12px} .card h3{margin:0 0 4px;font-size:17px}
+details{margin:8px 0} summary{cursor:pointer;font-weight:600} small{color:#666}
+"""
+
+
+def badge_html(l: Listing) -> str:
+    return f"<span class='b new'>{esc(l.badge)}</span>" if l.badge else ""
+
+
+def left_txt(l: Listing) -> str:
+    return "unknown" if l.unrated else fmt(l.est_left)
 
