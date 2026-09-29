@@ -1,91 +1,4 @@
 
-CSV_FIELDS = ["status", "rank", "confidence", "conf_why", "source", "year", "make", "model", "title", "price", "miles",
-              "est_left", "life_low", "deductions", "dist", "dist_basis", "place", "seller", "vin", "url", "flags"]
-
-
-def write_csv(path: Path, rows: list[Listing], ranked: bool) -> None:
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        w.writeheader()
-        for i, l in enumerate(rows, 1):
-            w.writerow({"status": l.status, "rank": i if ranked else "", "confidence": l.confidence, "conf_why": l.conf_why,
-                        "source": l.source, "year": l.year, "make": l.make, "model": l.model_key or l.model,
-                        "title": l.title, "price": l.price, "miles": l.miles, "est_left": l.est_left, "life_low": l.life_low,
-                        "deductions": "; ".join(f"{n} -{d}" for n, d in l.deductions), "dist": l.dist,
-                        "dist_basis": l.dist_basis, "place": l.place, "seller": l.seller, "vin": l.vin, "url": l.url,
-                        "flags": "; ".join(l.flags + l.notes)})
-
-
-# --------------------------------------------------------------------------- main
-
-def build_config(args: argparse.Namespace) -> dict:
-    cfg = deep_merge(DEFAULTS, {})
-    if args.config:
-        cfg = deep_merge(cfg, load_config_file(Path(args.config)))
-    if args.zip:
-        cfg["zip"] = args.zip
-    if args.radius is not None:
-        cfg["radius_miles"] = args.radius
-    if args.cap:
-        caps = {}
-        for c in args.cap:
-            mk, _, pr = c.partition("=")
-            caps[norm_make(mk)] = int(pr.replace(",", "").replace("$", ""))
-        cfg["price_caps"] = caps
-    if args.models:
-        cfg["models"] = [m.strip().lower() for m in args.models.split(",") if m.strip()]
-    if args.out:
-        cfg["output_dir"] = args.out
-    if args.csv:
-        cfg["csv"] = True
-    if args.no_md:
-        cfg["md"] = False
-    if args.min_miles_left is not None:
-        cfg["min_miles_left"] = args.min_miles_left
-    if args.top is not None:
-        cfg["top_n"] = args.top
-    if args.min_price is not None:
-        cfg["min_price"] = args.min_price
-    if args.year_min is not None:
-        cfg["year_min"] = args.year_min
-    if args.no_craigslist:
-        cfg["craigslist"]["enabled"] = False
-    if args.no_autodev:
-        cfg["autodev"]["enabled"] = False
-    if args.detail_pages is not None:
-        cfg["craigslist"]["detail_pages"] = args.detail_pages
-    if args.auction_url:
-        cfg["auctions"] = {"enabled": True, "urls": [{"url": u, "zip": args.auction_zip or ""} for u in args.auction_url]}
-    caps = {norm_make(str(k)): int(str(v).replace(",", "").replace("$", "")) for k, v in (cfg.get("price_caps") or {}).items()
-            if v not in (None, "")}
-    anyc = next((caps.pop(k) for k in ANY_MAKE_KEYS if k in caps), None)
-    cfg["_any_cap"] = anyc
-    FUZZY_MODELS["on"] = anyc is not None
-    # `any` = one cap for ALL makes (see cap_for); explicit per-make caps stay in price_caps and win for that make
-    cfg["price_caps"] = caps
-    cfg["zip"] = str(cfg.get("zip") or "").strip()
-    missing = [k for k, ok in [("zip", re.fullmatch(r"\d{5}", cfg["zip"])),
-                               ("price_caps", cfg["price_caps"] or anyc is not None),
-                               ("output_dir", cfg.get("output_dir"))] if not ok]
-    if missing:
-        raise SystemExit(f"Missing required setting(s): {', '.join(missing)}. Use --config or --zip/--cap/--out (see --help).")
-    return cfg
-
-
-def merge_reposts(items: list[Listing], cfg: dict) -> tuple[list[Listing], int]:
-    """Same car posted more than once with different titles: same year, make and model (normalized),
-    odometer within 500 mi and price within 5%. Keeps the lower price (then the newer post) and notes it."""
-    ov = cfg.get("lifespan_overrides") or {}
-
-    def key(l: Listing) -> tuple | None:
-        if not (l.year and l.make and l.miles is not None and l.price):
-            return None
-        mk = model_key(l.make, f"{l.make} {l.model} {l.title}", ov)[0]
-        if mk is None:  # fall back to the first word of the normalized model text
-            words = re.findall(r"[a-z0-9-]+", normalize_models(" " + (l.model or "") + " "))
-            mk = words[0] if words else None
-        return (l.year, l.make, mk) if mk else None
-
     keys = {id(l): key(l) for l in items}
     kept: list[Listing] = []
     merged = 0
@@ -94,7 +7,7 @@ def merge_reposts(items: list[Listing], cfg: dict) -> tuple[list[Listing], int]:
         twin = None
         if k:
             for o in kept:
-                if keys[id(o)] == k and abs(o.miles - l.miles) <= 500 and \
+                if keys[id(o)] == k and abs(o.miles - l.miles) <= REPOST_MILES and \
                         abs(o.price - l.price) <= 0.05 * max(o.price, l.price):
                     twin = o
                     break
@@ -118,9 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--zip")
     p.add_argument("--radius", type=float, help="hard radius in miles (default 50; 0 = any distance)")
     p.add_argument("--cap", action="append", metavar="MAKE=PRICE",
-                   help="per-make price cap; repeat per make (sets the makes searched); any=PRICE = all makes")
+                   help="price cap (required, no default): any=PRICE for all makes, or MAKE=PRICE per make (repeatable)")
     p.add_argument("--models", help="comma-separated model allow-list, e.g. camry,corolla,civic")
-    p.add_argument("--out", help="output folder for reports")
+    p.add_argument("--out", help="output folder for reports (default: current folder)")
     p.add_argument("--csv", action="store_true", help="also write CSVs (passing + excluded)")
     p.add_argument("--no-md", action="store_true", help="don't write the Markdown report (on by default)")
     p.add_argument("--min-miles-left", type=int, help="min est. miles left (default 50000; 0 = no cutoff)")
@@ -139,8 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         if path.exists():
             raise SystemExit(f"{path} already exists; not overwriting.")
         path.write_text(SAMPLE_CONFIG)
-        print(f"Wrote {path}. Fill in zip, price_caps and output_dir (radius_miles 50 and min_miles_left 50000 are optional defaults; blank/0 = no cutoff), "
-              f"then run with --config {path}")
+        print(f"Wrote {path}. Fill in zip and price_caps (required; there is no default price). Everything else has "
+              f"defaults: radius_miles 50, min_miles_left 50000 (blank/0 = no cutoff), any make/model, and reports in "
+              f"the current folder when output_dir is blank. Then run with --config {path}")
         return 0
 
     cfg = build_config(args)
@@ -232,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else {}
     except Exception:  # noqa: BLE001
         seen = {}
+    first_run = not seen  # no (or empty) seen file: this run only sets the baseline
     for l in passing:
         old = seen.get(l.id)
         if seen and old is None:
@@ -241,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     seen.update({l.id: l.price for l in passing if l.price})
     seen_path.write_text(json.dumps(seen))
 
-    counts = {"raw": len(uniq), "in_radius": in_radius, "passing": len(passing), "reposts": reposts}
+    counts = {"raw": len(uniq), "in_radius": in_radius, "passing": len(passing), "reposts": reposts,
+              "first_run": first_run}
     page = render(cfg, picks, passing, excluded, sources, counts, run_at)
     stamp = run_at.strftime("%Y-%m-%d_%H%M")
     dated = out / f"used-car-scout-{stamp}.html"
@@ -258,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         write_csv(out / f"used-car-scout-{stamp}-excluded.csv", excluded, False)
 
     if reposts:
-        print(f"\n{reposts} repost(s) of the same car merged (same year/make/model, odometer ±500, price ±5%).")
+        print(f"\n{reposts} repost(s) of the same car merged (same year/make/model, odometer ±1,000, price ±5%).")
     print(f"\n{counts['raw']} unique listings → {in_radius} within {'radius & ' if radius_of(cfg) else ''}price → {len(passing)} pass all hard filters.")
     reasons: dict[str, int] = {}
     for l in excluded:
@@ -275,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{len(nu)} passing car(s) with no lifespan data (est. miles left unknown), listed after rated cars.")
     if not picks:
         print("  (none)")
+    if first_run:
+        print("\nFirst run: this sets the baseline; later runs mark new cars and price drops.")
     print(f"\nReport: {dated}\nLatest: {out / 'latest.html'}")
     if md_path:
         print(f"Markdown: {md_path}\nLatest MD: {out / 'latest.md'}")
