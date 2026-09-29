@@ -1,34 +1,4 @@
 
-# --------------------------------------------------------------------------- report
-
-def esc(v: Any) -> str:
-    return html.escape("" if v is None else str(v))
-
-
-def fmt(v: Any) -> str:
-    return f"{v:,}" if isinstance(v, int) else "—"
-
-
-CSS = """
-body{font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#1d1d1f}
-h1{margin-bottom:4px} .muted{color:#666} table{border-collapse:collapse;width:100%;margin:8px 0 20px;font-size:14px}
-th,td{border-bottom:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top} th{background:#f6f6f6;position:sticky;top:0}
-.b{display:inline-block;padding:1px 7px;border-radius:9px;font-size:12px;font-weight:600;white-space:nowrap}
-.high{background:#d9f5df;color:#135c25}.medium{background:#fff1c9;color:#6b4d00}.low{background:#fde0dc;color:#8a1c0f}
-.new{background:#dbe9ff;color:#0b3d91} .warn{color:#8a1c0f;font-weight:600} .num{text-align:right;white-space:nowrap}
-.card{border:1px solid #ddd;border-radius:10px;padding:12px 14px;margin:0 0 12px} .card h3{margin:0 0 4px;font-size:17px}
-details{margin:8px 0} summary{cursor:pointer;font-weight:600} small{color:#666}
-"""
-
-
-def badge_html(l: Listing) -> str:
-    return f"<span class='b new'>{esc(l.badge)}</span>" if l.badge else ""
-
-
-def left_txt(l: Listing) -> str:
-    return "unknown" if l.unrated else fmt(l.est_left)
-
-
 def row_html(l: Listing, rank: str = "", excluded: bool = False) -> str:
     ded = "; ".join(f"{n} −{d // 1000}k" for n, d in l.deductions)
     life = f"{l.model_key} ~{l.life_low // 1000}k" if l.life_low else ("no lifespan data" if l.unrated else "unrated")
@@ -116,6 +86,7 @@ def render(cfg: dict, picks: list[Listing], passing: list[Listing], excluded: li
 <p class="muted">{where} · {esc(caps)} · models: {esc(models)}{must}.</p>
 <p><b>{counts['raw']}</b> listings found{f" ({counts['reposts']} repost(s) of the same car merged)" if counts.get('reposts') else ""} → <b>{counts['in_radius']}</b> within {'radius &amp; ' if rad else ''}price →
 <b>{counts['passing']}</b> pass every hard filter (confidence: high {tiers['high']} · medium {tiers['medium']} · low {tiers['low']}){unr}.</p>
+{'<p><b>First run:</b> this sets the baseline; later runs mark new cars and price drops.</p>' if counts.get('first_run') else ''}
 <h2>Sources this run</h2><table><tr><th>Source</th><th>Listings</th><th>Notes</th></tr>{src_rows}</table>
 {manual_html}
 <h2>Top picks</h2>
@@ -185,6 +156,8 @@ def render_md(cfg: dict, picks: list[Listing], passing: list[Listing], excluded:
                     + f" → **{counts['in_radius']}** within {'radius & ' if rad else ''}price → "
                     f"**{counts['passing']}** pass every hard filter (confidence: high {tiers['high']} · "
                     f"medium {tiers['medium']} · low {tiers['low']}){unr}.", "",
+                    *(["**First run:** this sets the baseline; later runs mark new cars and price drops.", ""]
+                      if counts.get("first_run") else []),
                     "## Sources this run", "", "| Source | Listings | Notes |", "|---|---:|---|"]
     L += [f"| {md_esc(s.name)} | {s.count} | {md_esc(s.note)} |" for s in sources]
     manual = cfg.get("manual_check_links") or []
@@ -241,3 +214,110 @@ def render_md(cfg: dict, picks: list[Listing], passing: list[Listing], excluded:
           "This report is a screen, not a buy signal: get a pre-purchase inspection and a history report before you commit.", ""]
     return "\n".join(L)
 
+
+CSV_FIELDS = ["status", "rank", "confidence", "conf_why", "source", "year", "make", "model", "title", "price", "miles",
+              "est_left", "life_low", "deductions", "dist", "dist_basis", "place", "seller", "vin", "url", "flags"]
+
+
+def write_csv(path: Path, rows: list[Listing], ranked: bool) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        for i, l in enumerate(rows, 1):
+            w.writerow({"status": l.status, "rank": i if ranked else "", "confidence": l.confidence, "conf_why": l.conf_why,
+                        "source": l.source, "year": l.year, "make": l.make, "model": l.model_key or l.model,
+                        "title": l.title, "price": l.price, "miles": l.miles, "est_left": l.est_left, "life_low": l.life_low,
+                        "deductions": "; ".join(f"{n} -{d}" for n, d in l.deductions), "dist": l.dist,
+                        "dist_basis": l.dist_basis, "place": l.place, "seller": l.seller, "vin": l.vin, "url": l.url,
+                        "flags": "; ".join(l.flags + l.notes)})
+
+
+# --------------------------------------------------------------------------- main
+
+def build_config(args: argparse.Namespace) -> dict:
+    cfg = deep_merge(DEFAULTS, {})
+    if args.config:
+        cfg = deep_merge(cfg, load_config_file(Path(args.config)))
+    if args.zip:
+        cfg["zip"] = args.zip
+    if args.radius is not None:
+        cfg["radius_miles"] = args.radius
+    if args.cap:
+        caps = {}
+        for c in args.cap:
+            mk, _, pr = c.partition("=")
+            caps[mk] = pr
+        cfg["price_caps"] = caps
+    if args.models:
+        cfg["models"] = [m.strip().lower() for m in args.models.split(",") if m.strip()]
+    if args.out:
+        cfg["output_dir"] = args.out
+    if args.csv:
+        cfg["csv"] = True
+    if args.no_md:
+        cfg["md"] = False
+    if args.min_miles_left is not None:
+        cfg["min_miles_left"] = args.min_miles_left
+    if args.top is not None:
+        cfg["top_n"] = args.top
+    if args.min_price is not None:
+        cfg["min_price"] = args.min_price
+    if args.year_min is not None:
+        cfg["year_min"] = args.year_min
+    if args.no_craigslist:
+        cfg["craigslist"]["enabled"] = False
+    if args.no_autodev:
+        cfg["autodev"]["enabled"] = False
+    if args.detail_pages is not None:
+        cfg["craigslist"]["detail_pages"] = args.detail_pages
+    if args.auction_url:
+        cfg["auctions"] = {"enabled": True, "urls": [{"url": u, "zip": args.auction_zip or ""} for u in args.auction_url]}
+    raw_caps = cfg.get("price_caps") or {}
+    if not isinstance(raw_caps, dict):
+        raise SystemExit("price_caps must be a list of make: price pairs, e.g. `price_caps: {any: 12000}` "
+                         "(or --cap any=12000). There is no default price.")
+    caps = {}
+    problems: list[str] = []
+    for k, v in raw_caps.items():
+        if v in (None, ""):
+            continue
+        num = str(v).replace(",", "").replace("$", "").strip()
+        if not re.fullmatch(r"\d+(?:\.\d+)?", num):
+            problems.append(f"price_caps: `{k}: {v}` is not a price. Set the most you'll pay as a number, e.g. "
+                            "`any: 12000` in the config or --cap any=12000 (there is no default price)")
+            continue
+        caps[norm_make(str(k))] = int(float(num))
+    anyc = next((caps.pop(k) for k in ANY_MAKE_KEYS if k in caps), None)
+    cfg["_any_cap"] = anyc
+    FUZZY_MODELS["on"] = anyc is not None
+    # `any` = one cap for ALL makes (see cap_for); explicit per-make caps stay in price_caps and win for that make
+    cfg["price_caps"] = caps
+    cfg["zip"] = str(cfg.get("zip") or "").strip()
+    if not re.fullmatch(r"\d{5}", cfg["zip"]):
+        problems.append('zip: set your 5-digit US ZIP (config `zip: "12345"` or --zip 12345)')
+    if not (cfg["price_caps"] or anyc is not None) and not problems:
+        problems.append("price_caps: no price limit set, and there is no default. Add the most you'll pay, e.g. "
+                        "`price_caps: {any: 12000}` in the config or --cap any=12000")
+    if problems:
+        raise SystemExit("Can't run yet. Missing required setting(s):\n  - " + "\n  - ".join(problems))
+    if not str(cfg.get("output_dir") or "").strip():
+        cfg["output_dir"] = os.getcwd()  # blank = current working folder
+    return cfg
+
+
+REPOST_MILES = 1_000  # same car reposted: odometers within this many miles (and prices within 5%)
+
+
+def merge_reposts(items: list[Listing], cfg: dict) -> tuple[list[Listing], int]:
+    """Same car posted more than once with different titles: same year, make and model (normalized),
+    odometer within 1,000 mi and price within 5%. Keeps the lower price (then the newer post) and notes it."""
+    ov = cfg.get("lifespan_overrides") or {}
+
+    def key(l: Listing) -> tuple | None:
+        if not (l.year and l.make and l.miles is not None and l.price):
+            return None
+        mk = model_key(l.make, f"{l.make} {l.model} {l.title}", ov)[0]
+        if mk is None:  # fall back to the first word of the normalized model text
+            words = re.findall(r"[a-z0-9-]+", normalize_models(" " + (l.model or "") + " "))
+            mk = words[0] if words else None
+        return (l.year, l.make, mk) if mk else None
