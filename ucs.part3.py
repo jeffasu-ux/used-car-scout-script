@@ -1,11 +1,105 @@
 
+# Model names distinctive enough to imply the make when a title omits it ("2018 Civic EX", "2002 F150").
+# Digit-only and 2-letter keys and everyday words are left out.
+_GENERIC_MODELS = {"fit", "flex", "edge", "element", "pilot", "compass", "journey", "quest", "echo", "century",
+                   "liberty", "soul", "legacy", "spark", "insight", "passport", "discovery", "continental",
+                   "aviator", "terrain", "cooper", "genesis", "matrix", "commander", "volt", "bolt", "express",
+                   "transit", "defender", "envoy", "regal", "sable", "mariner", "dart", "rogue", "titan",
+                   "patriot", "caliber", "nitro", "juke", "leaf", "kicks", "forte", "stinger", "atlas",
+                   "beetle", "golf", "ranger", "escape", "focus", "sonic", "trax", "eos", "vibe", "tribute"}
+_counts: dict[str, int] = {}
+for _tbl in LIFESPAN.values():
+    for _k in _tbl:
+        _counts[_k] = _counts.get(_k, 0) + 1
+MODEL_MAKE: dict[str, str] = {k: mk for mk, tbl in LIFESPAN.items() for k in tbl
+                              if _counts[k] == 1 and len(k) >= 3 and not k.isdigit() and k not in _GENERIC_MODELS}
+MODEL_MAKE.update({"ranger": "ford", "escape": "ford", "focus": "ford", "rogue": "nissan", "golf": "volkswagen",
+                   "beetle": "volkswagen", "juke": "nissan"})  # generic words, but unambiguous next to a model year
+# Common US-market model names that are NOT in the lifespan table, so a title like "1995 Neon" still gets its
+# make (with `any`, it then uses the make average, or "no lifespan data" for makes without one). These only
+# count when the title also has a model year.
+EXTRA_MODEL_MAKE: dict[str, str] = {
+    **dict.fromkeys(["neon", "stratus", "intrepid", "magnum", "viper", "grand caravan", "ram van", "sprinter van"], "dodge"),
+    **dict.fromkeys(["cavalier", "lumina", "monte carlo", "astro", "s10", "s-10", "beretta", "el camino", "chevelle",
+                     "caprice", "uplander", "aveo", "ssr", "captiva", "k10", "c10", "k1500", "c1500", "k2500",
+                     "c2500"], "chevrolet"),
+    **dict.fromkeys(["windstar", "freestar", "five hundred", "contour", "probe", "thunderbird", "excursion",
+                     "e-150", "e-250", "e-350", "e150", "e250", "e350", "ecosport", "aerostar", "escort", "f-100",
+                     "f100"], "ford"),
+    **dict.fromkeys(["celica", "tercel", "previa", "t100", "supra", "paseo", "cressida", "mr2"], "toyota"),
+    **dict.fromkeys(["prelude", "del sol", "cr-z", "clarity"], "honda"),
+    **dict.fromkeys(["cube", "240sx", "300zx", "stanza", "nv200"], "nissan"),
+    **dict.fromkeys(["protege", "millenia", "626", "rx-8", "rx8", "rx-7", "rx7", "mpv", "b2300", "b3000", "b4000"], "mazda"),
+    **dict.fromkeys(["entourage", "xg350", "tiburon"], "hyundai"),
+    **dict.fromkeys(["spectra", "amanti", "rondo", "borrego", "sephia"], "kia"),
+    **dict.fromkeys(["montero", "diamante", "3000gt", "eclipse"], "mitsubishi"),
+    **dict.fromkeys(["tribeca", "svx"], "subaru"),
+    **dict.fromkeys(["sl1", "sl2", "sc2", "ion", "vue", "aura"], "saturn"),
+    **dict.fromkeys(["sunfire", "grand am", "bonneville", "aztek", "firebird", "solstice", "trans am", "fiero"], "pontiac"),
+    **dict.fromkeys(["alero", "cutlass", "bravada", "delta 88", "achieva"], "oldsmobile"),
+    **dict.fromkeys(["prowler"], "plymouth"),
+    **dict.fromkeys(["concorde", "lhs", "crossfire", "le baron", "lebaron", "new yorker", "cirrus"], "chrysler"),
+    **dict.fromkeys(["comanche", "cj5", "cj-5", "cj7", "cj-7"], "jeep"),
+    **dict.fromkeys(["9-3", "9-5"], "saab"),
+    **dict.fromkeys(["sx4", "grand vitara", "vitara", "xl-7", "xl7", "kizashi", "samurai", "forenza", "aerio"], "suzuki"),
+    **dict.fromkeys(["rodeo", "trooper", "ascender", "hombre"], "isuzu"),
+    **dict.fromkeys(["villager", "marauder", "montego"], "mercury"),
+    **dict.fromkeys(["skylark", "terraza", "cascada", "roadmaster", "riviera"], "buick"),
+    **dict.fromkeys(["seville", "eldorado", "catera", "xlr", "fleetwood"], "cadillac"),
+    **dict.fromkeys(["mark lt", "mark viii", "zephyr", "blackwood"], "lincoln"),
+    **dict.fromkeys(["rabbit", "routan", "cabrio", "corrado", "vanagon", "eurovan", "arteon"], "volkswagen"),
+    **dict.fromkeys(["clk", "cls"], "mercedes"),
+    **dict.fromkeys(["c70", "s70", "v50"], "volvo"),
+    **dict.fromkeys(["500l", "500x"], "fiat"),
+    **dict.fromkeys(["giulia", "stelvio"], "alfa romeo"),
+    **dict.fromkeys(["jimmy", "sonoma", "s15"], "gmc"),
+}
+
+
+def find_make(text: str) -> str:
+    t = (text or "").lower()
+    for m in KNOWN_MAKES:
+        if re.search(rf"(?<![a-z]){re.escape(m)}(?![a-z])", t):
+            return norm_make(m)
+    return ""
+
+
+# Conservative typo fixes seen in real listings, plus glued-on suffixes ("focus52km" -> "focus 52km").
+TYPOS = [(r"(?<![a-z])(?<!santa )cruz(?![a-z])", "cruze"), (r"(?<![a-z])camey(?![a-z])", "camry"),
+         (r"(?<![a-z])pruis(?![a-z])", "prius"), (r"(?<![a-z])corrolla(?![a-z])", "corolla"),
+         (r"(?<![a-z])carolla(?![a-z])", "corolla"), (r"(?<![a-z])acord(?![a-z])", "accord"),
+         (r"(?<![a-z])civc(?![a-z])", "civic"), (r"(?<![a-z])tacomo(?![a-z])", "tacoma"),
+         (r"(?<![a-z])silverato(?![a-z])", "silverado"), (r"(?<![a-z])expidition(?![a-z])", "expedition")]
+_ALL_MODELS = sorted({k for tbl in LIFESPAN.values() for k in tbl if k[-1].isalpha() and len(k) >= 4}, key=len, reverse=True)
+_GLUED = re.compile(r"(?<![a-z0-9-])(" + "|".join(re.escape(k) for k in _ALL_MODELS) +
+                    r")(\d+(?:k|km|mi|miles)?|k|km)(?![a-z0-9])")
+
+
+FUZZY_MODELS = {"on": False}  # typo / glued-suffix fixes: switched on for `any` (all makes) searches in build_config
+
+
+def normalize_models(t: str) -> str:
+    """Lower-case title text with aliases (and, for `any` searches, common misspellings and glued suffixes) fixed."""
+    for a, b in ALIASES.items():
+        t = re.sub(rf"(?<![a-z0-9]){re.escape(a)}(?![a-z0-9])", b, t)
+    if not FUZZY_MODELS["on"]:
+        return t
+    for rx, rep in TYPOS:
+        t = re.sub(rx, rep, t)
+    return _GLUED.sub(r"\1 \2", t)
+
+
 def infer_make(title: str) -> str:
     """Make from a distinctive model name, for titles like '2018 Civic EX' (used only with the `any` cap)."""
-    has_year = re.search(r"(?<!\d)(19[5-9]\d|20[0-3]\d)(?!\d)|[\u2018'](\d\d)\b", title or "")
+    has_year = parse_year(title) is not None
     t = normalize_models(" " + (title or "").lower().replace("_", " ") + " ")
     for k in sorted(MODEL_MAKE, key=len, reverse=True):
         if (has_year or len(k) >= 6) and re.search(rf"(?<![a-z0-9-]){re.escape(k)}(?![a-z0-9-])", t):
             return MODEL_MAKE[k]
+    if has_year:
+        for k in sorted(EXTRA_MODEL_MAKE, key=len, reverse=True):
+            if re.search(rf"(?<![a-z0-9-]){re.escape(k)}(?![a-z0-9-])", t):
+                return EXTRA_MODEL_MAKE[k]
     return ""
 
 
@@ -209,7 +303,10 @@ def locate(l: Listing, home: tuple[float, float]) -> None:
 K_MILES = re.compile(r"\b(\d{2,3})\s*k\s*(?:mi|miles|mile)?\b", re.I)
 MILES = re.compile(r"(?:odometer|mileage)[^\d]{0,12}(\d{1,3}(?:,\d{3})+|\d{3,6})\b|(\d{1,3}(?:,\d{3})+|\d{4,6})\s*(?:mi|miles)\b", re.I)
 PRICE = re.compile(r"\$\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,6})")
-YEAR = re.compile(r"\b(199\d|20[0-3]\d)\b")
+YEAR = re.compile(r"\b(19[5-9]\d|20[0-3]\d)\b")
+_APOS = "'\\u2018\\u2019`"
+YY_LEAD = re.compile(rf"(?<![\w{_APOS}])[{_APOS}](\d\d)(?![\d{_APOS}\"])")      # '82, ‘82, ’07
+YY_TRAIL = re.compile(rf"^\W*?(\d\d)\s?[{_APOS}](?![\d{_APOS}\"])")             # 07 ' Nissan..., 07' Civic
 VIN = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 
 
@@ -241,7 +338,14 @@ def parse_miles(text: str) -> int | None:
 
 def parse_year(text: str) -> int | None:
     m = YEAR.search(text or "")
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    m = YY_LEAD.search(text or "") or YY_TRAIL.search(text or "")
+    if not m:
+        return None
+    yy = int(m.group(1))
+    y = 2000 + yy if yy <= (dt.date.today().year + 1) % 100 else 1900 + yy
+    return y if y >= 1950 else None
 
 
 def parse_price(text: str) -> int | None:
@@ -307,52 +411,4 @@ def cl_base(cfg: dict, http: Polite) -> str:
     if m and m.group(1) != "www":
         return f"https://{m.group(1)}.craigslist.org/search/cta"
     return final
-
-
-def cl_sapi(http: Polite, area_id: int, q: dict, sec: dict) -> list[dict]:
-    """Craigslist's own JSON search API (what the JS-rendered search page calls).
-    Returns plain dicts: id, url, title, price, miles, lat, lon, place."""
-    params = {"batch": f"{area_id}-0-360-0-0", "cc": "US", "lang": "en", "searchPath": "cta"}
-    params.update({k: v for k, v in q.items() if k != "cat"})
-    r = http.get("https://sapi.craigslist.org/web/v8/postings/search/full?" + urlencode(params),
-                 headers={"Accept": "application/json", "Referer": "https://www.craigslist.org/"})
-    why = blocked(r)
-    if why:
-        raise RuntimeError(f"search API {why}")
-    data = r.json().get("data") or {}
-    dec = data.get("decode") or {}
-    min_id = int(dec.get("minPostingId") or 0)
-    locs = dec.get("locations") or []
-    descs = dec.get("locationDescriptions") or []
-    out = []
-    for it in data.get("items") or []:
-        if not isinstance(it, list) or len(it) < 5:
-            continue
-        tags = {x[0]: x[1:] for x in it if isinstance(x, list) and x and isinstance(x[0], int)}
-        title = next((x for x in reversed(it) if isinstance(x, str) and not re.match(r"^\d+:\d+~", x)), "")
-        pid = min_id + int(it[0] or 0)
-        price = it[3] if isinstance(it[3], int) and it[3] > 0 else to_int((tags.get(10) or [None])[0])
-        lat = lon = None
-        host, sub, place = "", "", ""
-        lm = re.match(r"^(\d+):(\d+)~(-?[\d.]+)~(-?[\d.]+)", str(it[4]))
-        if lm:
-            li, di = int(lm.group(1)), int(lm.group(2))
-            lat, lon = float(lm.group(3)), float(lm.group(4))
-            if 0 < li < len(locs) and isinstance(locs[li], list):
-                host = locs[li][1] if len(locs[li]) > 1 else ""
-                sub = locs[li][2] if len(locs[li]) > 2 else ""
-            if 0 < di < len(descs):
-                place = str(descs[di])
-        slug = (tags.get(6) or [""])[0]
-        token = (tags.get(13) or [""])[0]
-        if token and slug:
-            url = f"https://www.craigslist.org/view/d/{slug}/{token}"
-        elif host and slug:
-            url = f"https://{host}.craigslist.org/{sub + '/' if sub else ''}cto/d/{slug}/{pid}.html"
-        else:
-            continue
-        miles = (tags.get(9) or [None])[0]
-        out.append({"id": f"cl:{pid}", "pid": pid, "url": url, "title": title, "price": price,
-                    "miles": miles if isinstance(miles, int) else None, "lat": lat, "lon": lon, "place": place})
-    return out
 
