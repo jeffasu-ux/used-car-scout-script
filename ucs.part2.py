@@ -231,3 +231,4 @@ def not_a_car(title: str) -> bool:
 def norm_make(s: str) -> str:
     s = (s or "").strip().lower()
     return MAKE_ALIASES.get(s, s)
+
